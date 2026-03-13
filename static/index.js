@@ -48,9 +48,9 @@ function getPhotoTooltipEl() {
 function showPhotoTooltip(photo, pinEl) {
   const tip = getPhotoTooltipEl();
   const img = tip ? tip.querySelector("img") : null;
-  if (!tip || !img || !photo || !photo.thumb || !pinEl) return;
+  if (!tip || !img || !photo || !pinEl) return;
   hoverPhoto = photo;
-  img.src = "data:image/jpeg;base64," + photo.thumb;
+  img.src = photo.thumb_url;
   img.alt = "Photo at location";
   const dateEl = tip.querySelector(".photo-tooltip-date");
   const coordsEl = tip.querySelector(".photo-tooltip-coords");
@@ -919,7 +919,7 @@ function openPhotoModal(photo) {
   img.onload = img.onerror = function () {
     wrap.classList.add("loaded");
   };
-  img.src = "/api/photos/full?id=" + encodeURIComponent(photo.id);
+  img.src = photo.url;
   const dateEl = modal.querySelector(".photo-modal-date");
   const coordsEl = modal.querySelector(".photo-modal-coords");
   if (dateEl) dateEl.textContent = photo.date || "";

@@ -4,14 +4,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
-	"encoding/base64"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"encoding/xml"
 	"flag"
 	"fmt"
-	"image"
-	"image/jpeg"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -27,9 +24,7 @@ import (
 	"time"
 
 	"github.com/dsoprea/go-exif/v3"
-	heicexif "github.com/dsoprea/go-heic-exif-extractor/v2"
-	"github.com/gen2brain/heic"
-	"golang.org/x/image/draw"
+	exifcommon "github.com/dsoprea/go-exif/v3/common"
 )
 
 const (
@@ -39,7 +34,6 @@ const (
 	maxSegmentLenDeg    = 0.006
 	pathMatchToleranceM = 15
 	headingToleranceDeg = 30
-	photoThumbMaxSizePx = 256
 )
 
 type point struct {
@@ -125,11 +119,12 @@ type drawOverlayPayload struct {
 }
 
 type photoRecord struct {
-	ID          string  `json:"id"`
-	Lat         float64 `json:"lat"`
-	Lon         float64 `json:"lon"`
-	Date        string  `json:"date,omitempty"`
-	ThumbBase64 string  `json:"thumb,omitempty"`
+	ID       string  `json:"id"`
+	Lat      float64 `json:"lat"`
+	Lon      float64 `json:"lon"`
+	Date     string  `json:"date,omitempty"`
+	URL      string  `json:"url"`
+	ThumbURL string  `json:"thumb_url,omitempty"`
 }
 
 type photoData struct {
@@ -392,7 +387,7 @@ func (s *Server) tick() {
 	slog.Debug("tick", "step", "nbd_and_draw", "duration_ms", time.Since(t0).Milliseconds())
 
 	t0 = time.Now()
-	if payload := processImagesDir(filepath.Join(staticDir, "images/sf")); payload != nil {
+	if payload := processImagesDir(filepath.Join(staticDir, "images", "full")); payload != nil {
 		s.photos.Store(payload)
 	} else {
 		s.photos.Store(&photoData{Photos: nil})
@@ -514,35 +509,10 @@ func main() {
 		gz.Write(body)
 		gz.Close()
 	})
-	http.HandleFunc("/api/photos/full", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", 405)
-			return
-		}
-		id := r.URL.Query().Get("id")
-		if id == "" || strings.Contains(id, "..") || filepath.Clean(id) != id {
-			http.Error(w, "not found", 404)
-			return
-		}
-		filePath := filepath.Join(staticDir, "images", "sf", id)
-		raw, err := os.ReadFile(filePath)
-		if err != nil {
-			http.Error(w, "not found", 404)
-			return
-		}
-		if !strings.HasSuffix(strings.ToLower(id), ".heic") {
-			http.Error(w, "not found", 404)
-			return
-		}
-		jpegBytes, err := makeFullJPEGFromHEIC(raw)
-		if err != nil {
-			http.Error(w, "internal error", 500)
-			return
-		}
-		w.Header().Set("Content-Type", "image/jpeg")
-		w.Header().Set("Cache-Control", "private, max-age=3600")
-		w.Write(jpegBytes)
-	})
+	imagesFullDir := filepath.Join(staticDir, "images", "full")
+	http.Handle("/static/images/full/", http.StripPrefix("/static/images/full", http.FileServer(http.Dir(imagesFullDir))))
+	imagesThumbDir := filepath.Join(staticDir, "images", "thumb")
+	http.Handle("/static/images/thumb/", http.StripPrefix("/static/images/thumb", http.FileServer(http.Dir(imagesThumbDir))))
 	http.HandleFunc("/api/streets", func(w http.ResponseWriter, r *http.Request) {
 		body := []byte("[]")
 		if b := srv.streetsBody.Load(); b != nil {
@@ -770,49 +740,6 @@ func haversineM(lon1, lat1, lon2, lat2 float64) float64 {
 	return earthRadiusM * c
 }
 
-func makeThumbnailFromHEIC(raw []byte, maxPx int) (jpegBytes []byte, err error) {
-	img, err := heic.Decode(bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	bounds := img.Bounds()
-	w, h := bounds.Dx(), bounds.Dy()
-	if w <= 0 || h <= 0 {
-		return nil, fmt.Errorf("invalid image size")
-	}
-	scale := float64(maxPx) / float64(max(w, h))
-	newW, newH := w, h
-	if scale < 1 {
-		newW = int(math.Round(float64(w) * scale))
-		newH = int(math.Round(float64(h) * scale))
-		if newW < 1 {
-			newW = 1
-		}
-		if newH < 1 {
-			newH = 1
-		}
-	}
-	dst := image.NewRGBA(image.Rect(0, 0, newW, newH))
-	draw.ApproxBiLinear.Scale(dst, dst.Bounds(), img, bounds, draw.Src, nil)
-	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 85}); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func makeFullJPEGFromHEIC(raw []byte) (jpegBytes []byte, err error) {
-	img, err := heic.Decode(bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
 func exifDateString(rootIfd *exif.Ifd) string {
 	const exifTimeLayout = "2006:01:02 15:04:05"
 	tryTag := func(ifd *exif.Ifd, tagID uint16) string {
@@ -847,20 +774,43 @@ func processImagesDir(dirPath string) *photoData {
 		slog.Warn("images dir not found, skipping photos", "path", dirPath, "err", err)
 		return nil
 	}
-	var heicNames []string
+	var jpgNames []string
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		if strings.HasSuffix(strings.ToLower(e.Name()), ".heic") {
-			heicNames = append(heicNames, e.Name())
+		name := e.Name()
+		lower := strings.ToLower(name)
+		if !strings.HasSuffix(lower, ".jpg") {
+			continue
+		}
+		jpgNames = append(jpgNames, name)
+	}
+	slog.Debug("processing images dir", "jpg_files", len(jpgNames))
+
+	im, err := exifcommon.NewIfdMappingWithStandard()
+	if err != nil {
+		slog.Warn("exif mapping", "err", err)
+		return nil
+	}
+	if err := exifcommon.LoadStandardIfds(im); err != nil {
+		if strings.Contains(err.Error(), "already registered under IFD") {
+			slog.Warn("exif load standard ifds", "err", err)
+		} else {
+			slog.Error("exif load standard ifds", "err", err)
+			return nil
 		}
 	}
-	slog.Debug("processing images dir", "heic_files", len(heicNames))
+	ti := exif.NewTagIndex()
+	if err := exif.LoadStandardTags(ti); err != nil {
+		slog.Warn("exif load standard tags", "err", err)
+		return nil
+	}
+
 	var photos []photoRecord
 	var processed int
 	var firstSkipReason string
-	for _, name := range heicNames {
+	for _, name := range jpgNames {
 		filePath := filepath.Join(dirPath, name)
 		raw, err := os.ReadFile(filePath)
 		if err != nil {
@@ -870,32 +820,8 @@ func processImagesDir(dirPath string) *photoData {
 			slog.Debug("skip image read", "name", name, "err", err)
 			continue
 		}
-		parser := heicexif.NewHeicExifMediaParser()
-		if !parser.LooksLikeFormat(raw) {
-			if firstSkipReason == "" {
-				firstSkipReason = "not HEIC format"
-			}
-			slog.Debug("skip not HEIC format", "name", name)
-			continue
-		}
-		mc, err := parser.ParseBytes(raw)
-		if err != nil {
-			if firstSkipReason == "" {
-				firstSkipReason = "parse: " + err.Error()
-			}
-			slog.Debug("skip parse HEIC", "name", name, "err", err)
-			continue
-		}
-		hec, ok := mc.(heicexif.HeicExifContext)
-		if !ok {
-			if firstSkipReason == "" {
-				firstSkipReason = "HEIC context type assert failed"
-			}
-			slog.Debug("skip HEIC context type", "name", name)
-			continue
-		}
-		rootIfd, _, err := hec.Exif()
-		if err != nil || rootIfd == nil {
+		rawExif, err := exif.SearchAndExtractExif(raw)
+		if err != nil || len(rawExif) == 0 {
 			if firstSkipReason == "" {
 				firstSkipReason = "no EXIF"
 				if err != nil {
@@ -905,13 +831,19 @@ func processImagesDir(dirPath string) *photoData {
 			slog.Debug("skip no EXIF", "name", name, "err", err)
 			continue
 		}
+		_, index, err := exif.Collect(im, ti, rawExif)
+		if err != nil {
+			if firstSkipReason == "" {
+				firstSkipReason = "parse EXIF: " + err.Error()
+			}
+			slog.Debug("skip exif collect", "name", name, "err", err)
+			continue
+		}
+		rootIfd := index.RootIfd
 		gpsIfd, err := exif.FindIfdFromRootIfd(rootIfd, "IFD/GPSInfo")
 		if err != nil || gpsIfd == nil {
 			if firstSkipReason == "" {
 				firstSkipReason = "no GPS IFD in EXIF"
-				if err != nil {
-					firstSkipReason += ": " + err.Error()
-				}
 			}
 			slog.Debug("skip no GPS IFD", "name", name, "err", err)
 			continue
@@ -920,9 +852,6 @@ func processImagesDir(dirPath string) *photoData {
 		if err != nil || gps == nil {
 			if firstSkipReason == "" {
 				firstSkipReason = "no GPS in EXIF"
-				if err != nil {
-					firstSkipReason += ": " + err.Error()
-				}
 			}
 			slog.Debug("skip no GPS", "name", name, "err", err)
 			continue
@@ -935,34 +864,20 @@ func processImagesDir(dirPath string) *photoData {
 			slog.Debug("skip zero GPS", "name", name)
 			continue
 		}
-
 		processed++
-		var thumb []byte
-		if thumb, err = rootIfd.Thumbnail(); err != nil {
-			thumb = nil
-		}
-		if len(thumb) == 0 {
-			thumb, _ = makeThumbnailFromHEIC(raw, photoThumbMaxSizePx)
-		}
-		rec := photoRecord{ID: name, Lat: lat, Lon: lon, Date: exifDateString(rootIfd)}
-		if len(thumb) > 0 {
-			rec.ThumbBase64 = base64.StdEncoding.EncodeToString(thumb)
+		rec := photoRecord{
+			ID:       name,
+			Lat:      lat,
+			Lon:      lon,
+			Date:     exifDateString(rootIfd),
+			URL:      "/static/images/full/" + name,
+			ThumbURL: "/static/images/thumb/" + name,
 		}
 		photos = append(photos, rec)
 	}
 	slog.Debug("photos from images dir", "processed", processed, "included", len(photos))
-
-	var noThumb int
-	for _, rec := range photos {
-		if rec.ThumbBase64 == "" {
-			noThumb++
-		}
-	}
-	if noThumb > 0 {
-		slog.Info("included photos without thumbnail", "count", noThumb, "hint", "HEIC often does not embed an EXIF thumbnail; markers will show without preview image")
-	}
-	if len(heicNames) > 0 && processed == 0 && firstSkipReason != "" {
-		slog.Info("all HEIC files skipped", "example_reason", firstSkipReason, "hint", "photos need GPS in EXIF and location inside SF")
+	if len(jpgNames) > 0 && processed == 0 && firstSkipReason != "" {
+		slog.Info("all JPG files skipped", "example_reason", firstSkipReason, "hint", "photos need GPS in EXIF")
 	}
 	return &photoData{Photos: photos}
 }
