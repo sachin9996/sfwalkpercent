@@ -163,23 +163,33 @@ func (s *Server) storeDrawPayload(pathFeats []streetFeat, st *nbdStats) {
 }
 
 func newServer() *Server {
+	start := time.Now()
 	s := &Server{}
-	b, err := os.ReadFile(filepath.Join(staticDir, "sf.geojson"))
+
+	sfPath := filepath.Join(staticDir, "sf.geojson")
+	t0 := time.Now()
+	b, err := os.ReadFile(sfPath)
 	if err != nil {
 		slog.Warn("read sf.geojson failed, using empty", "err", err)
 		streets = nil
 		s.tick()
 		return s
 	}
+	slog.Debug("startup", "step", "read_streets_file", "duration_ms", time.Since(t0).Milliseconds(), "size_bytes", len(b))
+
 	var doc struct {
 		Features []streetFeat `json:"features"`
 	}
+	t0 = time.Now()
 	if err := json.Unmarshal(b, &doc); err != nil {
 		slog.Warn("parse sf.geojson failed", "err", err)
 		streets = nil
 		s.tick()
 		return s
 	}
+	slog.Debug("startup", "step", "parse_streets_json", "duration_ms", time.Since(t0).Milliseconds(), "features", len(doc.Features))
+
+	t0 = time.Now()
 	var filtered []streetFeat
 	for _, f := range doc.Features {
 		h, _ := f.Properties["highway"].(string)
@@ -190,7 +200,9 @@ func newServer() *Server {
 		filtered = append(filtered, f)
 	}
 	streets = filtered
-	slog.Debug("loaded streets", "total", len(doc.Features), "walkable", len(streets))
+	slog.Debug("startup", "step", "filter_streets", "duration_ms", time.Since(t0).Milliseconds(), "walkable", len(streets))
+
+	t0 = time.Now()
 	fc := map[string]any{"type": "FeatureCollection", "features": streets}
 	body, err := json.Marshal(fc)
 	if err == nil {
@@ -198,23 +210,32 @@ func newServer() *Server {
 	}
 	s.storeDrawPayload(nil, nil)
 	s.photos.Store(&photoData{Photos: nil})
+	slog.Debug("startup", "step", "marshal_streets_and_draw_payload", "duration_ms", time.Since(t0).Milliseconds())
+
+	t0 = time.Now()
 	if nb, err := os.ReadFile(filepath.Join(staticDir, "neighborhoods.geojson")); err == nil {
-		var doc struct {
+		var nbdDoc struct {
 			Features []nbdFeat `json:"features"`
 		}
-		if json.Unmarshal(nb, &doc) == nil {
-			nbds = doc.Features
-			slog.Debug("loaded neighborhoods", "count", len(nbds))
+		if json.Unmarshal(nb, &nbdDoc) == nil {
+			nbds = nbdDoc.Features
+			slog.Debug("startup", "step", "load_neighborhoods", "duration_ms", time.Since(t0).Milliseconds(), "count", len(nbds))
 			if st := computeNbdStats(nil); st != nil {
 				s.nbds.Store(st)
 				s.storeDrawPayload(nil, st)
 			}
 		}
+	} else {
+		slog.Debug("startup", "step", "load_neighborhoods", "duration_ms", time.Since(t0).Milliseconds(), "skipped", true)
 	}
 	if s.drawCoreBody.Load() == nil {
 		s.storeDrawPayload(nil, nil)
 	}
+
+	t0 = time.Now()
 	s.tick()
+	slog.Debug("startup", "step", "first_tick", "duration_ms", time.Since(t0).Milliseconds())
+	slog.Debug("startup", "step", "done", "total_duration_ms", time.Since(start).Milliseconds())
 	return s
 }
 
@@ -262,22 +283,22 @@ func zipExportTime(z *zip.Reader, fallback time.Time) time.Time {
 
 func (s *Server) tick() {
 	start := time.Now()
-	defer func() {
-		slog.Debug("tick done", "duration_ms", time.Since(start).Milliseconds())
-	}()
 
 	dir := os.DirFS(dataDir)
+	t0 := time.Now()
 	entries, err := fs.Glob(dir, "export*.zip")
 	if err != nil {
-		slog.Error("glob data dir", "err", err)
+		slog.Error("tick glob data dir", "err", err)
 		return
 	}
+	slog.Debug("tick", "step", "glob", "duration_ms", time.Since(t0).Milliseconds(), "zips", len(entries))
 	if len(entries) == 0 {
 		slog.Warn("no export zip in data dir", "dir", dataDir)
 		return
 	}
 	var best string
 	var bestTime time.Time
+	t0 = time.Now()
 	for _, e := range entries {
 		path := filepath.Join(dataDir, e)
 		f, openErr := os.Open(path)
@@ -304,9 +325,10 @@ func (s *Server) tick() {
 	if best == "" || best == s.lastZip {
 		return
 	}
-	slog.Debug("tick milestone", "step", "zip_selected", "zip", best, "export_time", bestTime.Format(time.RFC3339))
+	slog.Debug("tick", "step", "zip_select", "duration_ms", time.Since(t0).Milliseconds(), "zip", best)
 	s.lastZip = best
 	path := filepath.Join(dataDir, best)
+	t0 = time.Now()
 	f, err := os.Open(path)
 	if err != nil {
 		slog.Error("open zip", "path", path, "err", err)
@@ -331,16 +353,20 @@ func (s *Server) tick() {
 		slog.Error("build paths", "path", path, "err", err)
 		return
 	}
-	slog.Debug("tick milestone", "step", "paths_built", "activities", len(paths))
+	slog.Debug("tick", "step", "build_paths", "duration_ms", time.Since(t0).Milliseconds(), "activities", len(paths))
+
+	t0 = time.Now()
 	visitedList, visitedSegs := matchPathsToStreets(paths)
-	slog.Debug("tick milestone", "step", "paths_matched", "visited_segments", len(visitedList))
+	slog.Debug("tick", "step", "match_paths", "duration_ms", time.Since(t0).Milliseconds(), "visited_segments", len(visitedList))
+
+	t0 = time.Now()
 	clippedVisited, droppedLong := clipStreetsToSF(visitedList)
 	if clippedVisited == nil {
 		clippedVisited = []any{}
 	}
-	if droppedLong > 0 {
-		slog.Debug("dropped long segments", "count", droppedLong)
-	}
+	slog.Debug("tick", "step", "clip", "duration_ms", time.Since(t0).Milliseconds(), "dropped_long", droppedLong)
+
+	t0 = time.Now()
 	processed, err := json.Marshal(clippedVisited)
 	if err != nil {
 		slog.Error("marshal paths", "err", err)
@@ -354,19 +380,25 @@ func (s *Server) tick() {
 	}
 	s.rawPaths.Store(&raw)
 	s.updated.Store(exportTime.UnixMilli())
-	slog.Debug("tick milestone", "step", "paths_stored")
+	slog.Debug("tick", "step", "marshal_store", "duration_ms", time.Since(t0).Milliseconds())
+
+	t0 = time.Now()
 	st := computeNbdStats(visitedSegs)
 	if st != nil {
 		s.nbds.Store(st)
 	}
 	s.storeDrawPayload(visitedList, st)
 	s.lastPaths.Store(&paths)
+	slog.Debug("tick", "step", "nbd_and_draw", "duration_ms", time.Since(t0).Milliseconds())
+
+	t0 = time.Now()
 	if payload := processImagesDir(filepath.Join(staticDir, "images/sf")); payload != nil {
 		s.photos.Store(payload)
 	} else {
 		s.photos.Store(&photoData{Photos: nil})
 	}
-	slog.Debug("tick milestone", "step", "nbd_stats_done", "zip", best)
+	slog.Debug("tick", "step", "images", "duration_ms", time.Since(t0).Milliseconds())
+	slog.Debug("tick", "step", "done", "duration_ms", time.Since(start).Milliseconds(), "zip", best)
 }
 
 func main() {
@@ -391,6 +423,7 @@ func main() {
 			staticDir = filepath.Join(cwd, "static")
 		}
 	}
+	slog.Debug("startup", "step", "begin", "data_dir", dataDir, "static_dir", staticDir)
 	srv := newServer()
 	go func() {
 		ticker := time.NewTicker(10 * time.Minute)
