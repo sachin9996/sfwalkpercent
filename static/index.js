@@ -833,9 +833,6 @@ function drawNbdHoverOutline(feat) {
   ctx.stroke(feat._path2d);
 }
 
-const PHOTO_PIN_SVG_RED =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="#e03535" stroke="#7a1212" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3" fill="#8b2222" stroke="none"/></svg>';
-
 function updatePhotoPins() {
   const layer = document.getElementById("photoPinsLayer");
   if (!layer) return;
@@ -845,7 +842,7 @@ function updatePhotoPins() {
   while (layer.children.length > photoList.length) {
     layer.lastChild.remove();
   }
-  const pinImgSrc = "data:image/svg+xml," + encodeURIComponent(PHOTO_PIN_SVG_RED);
+  const pinImgSrc = "/static/images/photo-pin.svg";
   for (let i = 0; i < photoList.length; i++) {
     const p = photoList[i];
     const { x, y } = projectCSS(p.lon, p.lat, w, h);

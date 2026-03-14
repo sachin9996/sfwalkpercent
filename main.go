@@ -391,6 +391,63 @@ func (s *Server) tick() {
 	slog.Debug("tick", "step", "done", "duration_ms", time.Since(start).Milliseconds(), "zip", best)
 }
 
+func (s *Server) registerStaticRoutes(staticDir string) {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		tmpl, err := os.ReadFile(filepath.Join(staticDir, "index.html"))
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+
+		var updatedText []byte
+		if ts := s.updated.Load(); ts != 0 {
+			updatedText = []byte("Last updated " + time.UnixMilli(ts).Format(time.RFC822Z))
+		}
+		html := bytes.Replace(tmpl, []byte("__LAST_UPDATED_TIMESTAMP__"), updatedText, 1)
+		var pctText []byte
+		if st := s.nbds.Load(); st != nil && len(st.List) > 0 {
+			var total, expl float64
+			for _, row := range st.List {
+				total += row.Total
+				expl += row.Expl
+			}
+			if total > 0 {
+				pct := 100 * expl / total
+				pctText = []byte(fmt.Sprintf("%.1f%% complete (%.1f/%.1f km)", math.Round(pct*10)/10, expl, total))
+			}
+		}
+		html = bytes.Replace(html, []byte("__OVERALL_PCT__"), pctText, 1)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(html)
+	})
+	serveStaticFile("/static/index.css", filepath.Join(staticDir, "index.css"), "text/css; charset=utf-8", true)
+	serveStaticFile("/static/index.js", filepath.Join(staticDir, "index.js"), "application/javascript; charset=utf-8", true)
+	registerImageRoutes(filepath.Join(staticDir, "images"), "/static/images/")
+}
+
+func serveStaticFile(route, filePath, contentType string, useGzip bool) {
+	http.HandleFunc(route, func(w http.ResponseWriter, r *http.Request) {
+		b, err := os.ReadFile(filePath)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", contentType)
+		if useGzip && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			w.Header().Set("Content-Encoding", "gzip")
+			gz := gzip.NewWriter(w)
+			gz.Write(b)
+			gz.Close()
+		} else {
+			w.Write(b)
+		}
+	})
+}
+
 func registerImageRoutes(rootDir, urlPrefix string) {
 	count := 0
 	filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, err error) error {
@@ -466,41 +523,6 @@ func main() {
 		}
 	}()
 
-	indexTmpl, err := os.ReadFile(filepath.Join(staticDir, "index.html"))
-	if err != nil {
-		slog.Error("read index.html", "err", err)
-		os.Exit(1)
-	}
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		var updatedText []byte
-		if ts := srv.updated.Load(); ts != 0 {
-			updatedText = []byte("Last updated " + time.UnixMilli(ts).Format(time.RFC822Z))
-		}
-		body := bytes.Replace(indexTmpl, []byte("__LAST_UPDATED_TIMESTAMP__"), updatedText, 1)
-		var pctText []byte
-		if st := srv.nbds.Load(); st != nil && len(st.List) > 0 {
-			var totalKm, explKm float64
-			for _, row := range st.List {
-				totalKm += row.Total
-				explKm += row.Expl
-			}
-			if totalKm > 0 {
-				pct := 100 * explKm / totalKm
-				pctText = []byte(fmt.Sprintf("%.1f%% complete (%.1f/%.1f km)", math.Round(pct*10)/10, explKm, totalKm))
-			}
-		}
-		if len(pctText) == 0 {
-			pctText = []byte("—")
-		}
-		body = bytes.Replace(body, []byte("__OVERALL_PCT__"), pctText, 1)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(body)
-	})
 	http.HandleFunc("/api/paths", func(w http.ResponseWriter, r *http.Request) {
 		body := []byte("[]")
 		if p := srv.paths.Load(); p != nil {
@@ -570,45 +592,16 @@ func main() {
 		gz.Write(body)
 		gz.Close()
 	})
-	http.HandleFunc("/static/index.css", func(w http.ResponseWriter, r *http.Request) {
-		b, err := os.ReadFile(filepath.Join(staticDir, "index.css"))
-		if err != nil {
-			http.Error(w, "not found", 404)
-			return
-		}
-		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-			w.Header().Set("Content-Encoding", "gzip")
-			gz := gzip.NewWriter(w)
-			gz.Write(b)
-			gz.Close()
-		} else {
-			w.Write(b)
-		}
-	})
-	http.HandleFunc("/static/index.js", func(w http.ResponseWriter, r *http.Request) {
-		b, err := os.ReadFile(filepath.Join(staticDir, "index.js"))
-		if err != nil {
-			http.Error(w, "not found", 404)
-			return
-		}
-		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-			w.Header().Set("Content-Encoding", "gzip")
-			gz := gzip.NewWriter(w)
-			gz.Write(b)
-			gz.Close()
-		} else {
-			w.Write(b)
-		}
-	})
-
-	registerImageRoutes(filepath.Join(staticDir, "images"), "/static/images/")
+	srv.registerStaticRoutes(staticDir)
 
 	mux := http.DefaultServeMux
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Cache-Control", "public, max-age=600")
+		if strings.HasPrefix(r.URL.Path, "/static/images/") {
+			h.Set("Cache-Control", "public, max-age=604800") // 1 week for images
+		} else {
+			h.Set("Cache-Control", "public, max-age=600")
+		}
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
