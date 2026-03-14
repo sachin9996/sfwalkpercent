@@ -133,16 +133,23 @@ type photoData struct {
 }
 
 type Server struct {
-	paths           atomic.Pointer[[]byte]
-	rawPaths        atomic.Pointer[[]byte]
+	paths atomic.Pointer[[]byte]
+	nbds  atomic.Pointer[nbdStats]
+
 	streetsBody     atomic.Pointer[[]byte]
 	drawCoreBody    atomic.Pointer[[]byte]
 	drawOverlayBody atomic.Pointer[[]byte]
-	nbds            atomic.Pointer[nbdStats]
-	photos          atomic.Pointer[photoData]
-	updated         atomic.Int64
-	lastZip         string
-	lastPaths       atomic.Pointer[[]pathFeature]
+
+	explKm   atomic.Pointer[string]
+	totalKm  atomic.Pointer[string]
+	explPct  atomic.Pointer[string]
+	explFrac atomic.Pointer[string]
+
+	photos atomic.Pointer[photoData]
+
+	updated   atomic.Int64
+	lastZip   string
+	lastPaths atomic.Pointer[[]pathFeature]
 }
 
 func (s *Server) storeDrawPayload(pathFeats []streetFeat, st *nbdStats) {
@@ -158,7 +165,7 @@ func (s *Server) storeDrawPayload(pathFeats []streetFeat, st *nbdStats) {
 	}
 }
 
-func newServer() *Server {
+func newServer() (*Server, error) {
 	start := time.Now()
 	s := &Server{}
 
@@ -166,10 +173,7 @@ func newServer() *Server {
 	t0 := time.Now()
 	b, err := os.ReadFile(sfPath)
 	if err != nil {
-		slog.Warn("read sf.geojson failed, using empty", "err", err)
-		streets = nil
-		s.tick()
-		return s
+		return nil, fmt.Errorf("read sf.geojson: %w", err)
 	}
 	slog.Debug("startup", "step", "read_streets_file", "duration_ms", time.Since(t0).Milliseconds(), "size_bytes", len(b))
 
@@ -178,10 +182,7 @@ func newServer() *Server {
 	}
 	t0 = time.Now()
 	if err := json.Unmarshal(b, &doc); err != nil {
-		slog.Warn("parse sf.geojson failed", "err", err)
-		streets = nil
-		s.tick()
-		return s
+		return nil, fmt.Errorf("parse sf.geojson: %w", err)
 	}
 	slog.Debug("startup", "step", "parse_streets_json", "duration_ms", time.Since(t0).Milliseconds(), "features", len(doc.Features))
 
@@ -232,7 +233,7 @@ func newServer() *Server {
 	s.tick()
 	slog.Debug("startup", "step", "first_tick", "duration_ms", time.Since(t0).Milliseconds())
 	slog.Debug("startup", "step", "done", "total_duration_ms", time.Since(start).Milliseconds())
-	return s
+	return s, nil
 }
 
 func zipExportTime(z *zip.Reader, fallback time.Time) time.Time {
@@ -377,6 +378,22 @@ func (s *Server) tick() {
 	if st != nil {
 		s.nbds.Store(st)
 	}
+
+	if st != nil && len(st.List) > 0 {
+		var total, expl float64
+		for _, row := range st.List {
+			total += row.Total
+			expl += row.Expl
+		}
+		if total > 0 {
+			frac := expl / total
+			s.explPct.Store(new(fmt.Sprintf("%.1f", math.Round(frac*1000)/10)))
+			s.explKm.Store(new(fmt.Sprintf("%.1f", expl)))
+			s.totalKm.Store(new(fmt.Sprintf("%.1f", total)))
+			s.explFrac.Store(new(fmt.Sprintf("%.4g", frac)))
+		}
+	}
+
 	s.storeDrawPayload(visitedList, st)
 	s.lastPaths.Store(&paths)
 	slog.Debug("tick", "step", "nbd_and_draw", "duration_ms", time.Since(t0).Milliseconds())
@@ -392,22 +409,6 @@ func (s *Server) tick() {
 }
 
 func (s *Server) registerStaticRoutes(staticDir string) {
-	var pctNum, explKm, totalKm, pctFrac string
-	if st := s.nbds.Load(); st != nil && len(st.List) > 0 {
-		var total, expl float64
-		for _, row := range st.List {
-			total += row.Total
-			expl += row.Expl
-		}
-		if total > 0 {
-			frac := expl / total
-			pctNum = fmt.Sprintf("%.1f", math.Round(frac*1000)/10)
-			explKm = fmt.Sprintf("%.1f", expl)
-			totalKm = fmt.Sprintf("%.1f", total)
-			pctFrac = fmt.Sprintf("%.4g", frac)
-		}
-	}
-
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -424,9 +425,9 @@ func (s *Server) registerStaticRoutes(staticDir string) {
 			updatedText = []byte("Last updated " + time.UnixMilli(ts).Format(time.RFC822Z))
 		}
 		html := bytes.Replace(tmpl, []byte("__LAST_UPDATED_TIMESTAMP__"), updatedText, 1)
-		html = bytes.Replace(html, []byte("__EXPL_PCT__"), []byte(pctNum), 1)
-		html = bytes.Replace(html, []byte("__EXPL_KM__"), []byte(explKm), 1)
-		html = bytes.Replace(html, []byte("__TOTAL_KM__"), []byte(totalKm), 1)
+		html = bytes.Replace(html, []byte("__EXPL_PCT__"), []byte(*s.explPct.Load()), 1)
+		html = bytes.Replace(html, []byte("__EXPL_KM__"), []byte(*s.explKm.Load()), 1)
+		html = bytes.Replace(html, []byte("__TOTAL_KM__"), []byte(*s.totalKm.Load()), 1)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(html)
 	})
@@ -437,7 +438,7 @@ func (s *Server) registerStaticRoutes(staticDir string) {
 			http.NotFound(w, r)
 			return
 		}
-		b = bytes.Replace(b, []byte("__EXPL_FRACTION__"), []byte(pctFrac), 1)
+		b = bytes.Replace(b, []byte("__EXPL_FRACTION__"), []byte(*s.explFrac.Load()), 1)
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 			w.Header().Set("Content-Encoding", "gzip")
@@ -540,13 +541,11 @@ func main() {
 		}
 	}
 	slog.Debug("startup", "step", "begin", "data_dir", dataDir, "static_dir", staticDir)
-	srv := newServer()
-	go func() {
-		ticker := time.NewTicker(10 * time.Minute)
-		for range ticker.C {
-			srv.tick()
-		}
-	}()
+	srv, err := newServer()
+	if err != nil {
+		slog.Error("create server", "err", err)
+		os.Exit(1)
+	}
 
 	http.HandleFunc("/api/paths", func(w http.ResponseWriter, r *http.Request) {
 		body := []byte("[]")
@@ -651,6 +650,13 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		for range ticker.C {
+			srv.tick()
+		}
+	}()
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
 	go func() {
@@ -663,6 +669,7 @@ func main() {
 		slog.Error("server", "err", err)
 		os.Exit(1)
 	}
+
 }
 
 type pathGeometry struct {
