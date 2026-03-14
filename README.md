@@ -1,6 +1,8 @@
 # SF Walk%
 
-Visualize San Francisco streets I've walked (from Apple Health data).
+https://sfwalkpercent.com
+
+Visualize San Francisco streets I've walked.
 
 ## Data
 
@@ -15,7 +17,8 @@ make
 
 ## Flags
 
-- `-addr` — listen address (default: `127.0.0.1:8080`)
+- `-addr` - listen address (default: `127.0.0.1:8080`)
+- `-debug`- adds debug logs
 
 ## Notes for me because I'm forgetful
 

@@ -596,16 +596,24 @@ func main() {
 
 	mux := http.DefaultServeMux
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") && r.Method != http.MethodGet {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		h := w.Header()
 		if strings.HasPrefix(r.URL.Path, "/static/images/") {
 			h.Set("Cache-Control", "public, max-age=604800") // 1 week for images
 		} else {
 			h.Set("Cache-Control", "public, max-age=600")
 		}
+		h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
-		h.Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+		h.Set("Permissions-Policy", "camera=(), geolocation=(), microphone=(), payment=(), usb=()")
+		h.Set("Content-Security-Policy", "default-src 'none'; base-uri 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
 		mux.ServeHTTP(w, r)
 	})
 
