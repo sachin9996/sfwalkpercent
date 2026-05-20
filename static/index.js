@@ -1,5 +1,11 @@
 const minScale = 700;
 const maxScale = 100000;
+
+const PHOTO_PIN_MIN_PX = 16;
+const PHOTO_PIN_MAX_PX = 26;
+const PHOTO_PIN_SCALE_LOW = 5000;
+const PHOTO_PIN_SCALE_HIGH = 40000;
+
 const defaultBounds = [-122.5136606, 37.670159, -122.357791, 37.8278432];
 const VIEW_BOUNDS = defaultBounds.slice();
 
@@ -942,6 +948,13 @@ function drawNbdHoverOutline(feat) {
   ctx.stroke(feat._path2d);
 }
 
+function photoPinSizePx(mapScale) {
+  const s = Math.max(PHOTO_PIN_SCALE_LOW, Math.min(PHOTO_PIN_SCALE_HIGH, mapScale));
+  const t =
+    (Math.log(s) - Math.log(PHOTO_PIN_SCALE_LOW)) / (Math.log(PHOTO_PIN_SCALE_HIGH) - Math.log(PHOTO_PIN_SCALE_LOW));
+  return PHOTO_PIN_MIN_PX + (PHOTO_PIN_MAX_PX - PHOTO_PIN_MIN_PX) * t;
+}
+
 function updatePhotoPins() {
   const layer = document.getElementById("photoPinsLayer");
   if (!layer) return;
@@ -950,12 +963,14 @@ function updatePhotoPins() {
   while (layer.children.length > photoList.length) {
     layer.lastChild.remove();
   }
+  const pinPx = photoPinSizePx(scale);
+  const pinHalf = pinPx / 2;
   const pinImgSrc = "/static/images/photo-pin.svg";
   for (let i = 0; i < photoList.length; i++) {
     const p = photoList[i];
     const { x, y } = projectCSS(p.lon, p.lat, w, h);
-    const px = x - 13;
-    const py = y - 26;
+    const px = x - pinHalf;
+    const py = y - pinPx;
     let pin = layer.children[i];
     if (!pin) {
       pin = document.createElement("button");
@@ -993,6 +1008,8 @@ function updatePhotoPins() {
     } else {
       pin.dataset.index = String(i);
     }
+    pin.style.width = pinPx + "px";
+    pin.style.height = pinPx + "px";
     pin.style.transform = "translate3d(" + px + "px, " + py + "px, 0)";
   }
   if (hoverPhoto && hoverPhotoPinEl) {
