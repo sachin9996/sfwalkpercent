@@ -122,7 +122,7 @@ type drawOverlayPayload struct {
 	Labels []drawLabel `json:"labels"`
 }
 
-type photoRecord struct {
+type imageMetadata struct {
 	ID       string  `json:"id"`
 	Lat      float64 `json:"lat"`
 	Lon      float64 `json:"lon"`
@@ -131,8 +131,8 @@ type photoRecord struct {
 	ThumbURL string  `json:"thumb_url,omitempty"`
 }
 
-type photoData struct {
-	Photos []photoRecord `json:"photos"`
+type imagesMetadata struct {
+	Images []imageMetadata `json:"photos"`
 }
 
 type cache struct {
@@ -170,8 +170,8 @@ type Server struct {
 	nbdStats atomic.Pointer[nbdStats]
 	paths    atomic.Pointer[[]byte]
 
-	photoHashes atomic.Value // map[string]string
-	photos      atomic.Pointer[photoData]
+	imageHashes    atomic.Value // map[string]string
+	imagesMetadata atomic.Pointer[imagesMetadata]
 
 	updateTime atomic.Int64
 
@@ -233,8 +233,8 @@ func newServer() (*Server, error) {
 		s.streetsBody = body
 	}
 	s.storeDrawPayload(nil, nil, nil)
-	s.photoHashes.Store(make(map[string]string))
-	s.photos.Store(&photoData{Photos: nil})
+	s.imageHashes.Store(make(map[string]string))
+	s.imagesMetadata.Store(&imagesMetadata{Images: nil})
 	slog.Debug("startup", "step", "marshal_streets_and_draw_payload", "duration_ms", time.Since(t0).Milliseconds())
 
 	t0 = time.Now()
@@ -277,28 +277,29 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func getImageHashes(dir string) (map[string]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("readDir: %w", err)
-	}
+func getImageHashes(rootDir, urlPrefix string) (map[string]string, error) {
 	out := make(map[string]string)
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	err := filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
 		}
-		name := e.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".webp") {
-			continue
+		switch strings.ToLower(filepath.Ext(d.Name())) {
+		case ".jpg", ".jpeg", ".png", ".svg", ".gif", ".webp", ".ico":
+		default:
+			return nil
 		}
-		p := filepath.Join(dir, name)
-		h, err := fileSHA256(p)
+		rel, err := filepath.Rel(rootDir, path)
 		if err != nil {
-			return nil, err
+			return nil
 		}
-		out[name] = h
-	}
-	return out, nil
+		h, err := fileSHA256(path)
+		if err != nil {
+			return err
+		}
+		out[urlPrefix+filepath.ToSlash(rel)] = h
+		return nil
+	})
+	return out, err
 }
 
 func zipExportTime(z *zip.Reader) (time.Time, error) {
@@ -360,20 +361,21 @@ func (s *Server) tick() {
 	}()
 
 	t0 := time.Now()
-	photosDir := filepath.Join(staticDir, "images", "full")
-	hashes, err := getImageHashes(photosDir)
+	imagesDir := filepath.Join(staticDir, "images")
+	hashes, err := getImageHashes(imagesDir, "/static/images/")
 	if err != nil {
-		slog.Error("photos dir hashes", "dir", photosDir, "err", err)
+		slog.Error("image hashes", "dir", imagesDir, "err", err)
 	} else {
-		prev := s.photoHashes.Load().(map[string]string)
+		prev := s.imageHashes.Load().(map[string]string)
 		if !maps.Equal(hashes, prev) {
-			if payload := processImagesDir(photosDir); payload != nil {
-				s.photos.Store(payload)
+			fullImagesDir := filepath.Join(imagesDir, "full")
+			if payload := processImagesDir(fullImagesDir); payload != nil {
+				s.imagesMetadata.Store(payload)
 			} else {
-				s.photos.Store(&photoData{Photos: nil})
+				s.imagesMetadata.Store(&imagesMetadata{Images: nil})
 			}
-			s.photoHashes.Store(hashes)
-			slog.Debug("tick", "step", "images", "duration_ms", time.Since(t0).Milliseconds(), "changed", true)
+			s.imageHashes.Store(hashes)
+			slog.Debug("tick", "step", "images", "duration_ms", time.Since(t0).Milliseconds(), "changed", true, "count", len(hashes))
 		}
 	}
 
@@ -557,20 +559,14 @@ func (s *Server) registerStaticRoutes(staticDir string) {
 		}
 	})
 
-	serveStaticFile("/static/index.js", filepath.Join(staticDir, "index.js"), "application/javascript; charset=utf-8", true)
-
-	registerImageRoutes(filepath.Join(staticDir, "images"), "/static/images/")
-}
-
-func serveStaticFile(route, filePath, contentType string, useGzip bool) {
-	handle(http.MethodGet, route, func(w http.ResponseWriter, r *http.Request) {
-		b, err := os.ReadFile(filePath)
+	handle(http.MethodGet, "/static/index.js", func(w http.ResponseWriter, r *http.Request) {
+		b, err := os.ReadFile(filepath.Join(staticDir, "index.js"))
 		if err != nil {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", contentType)
-		if useGzip && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 			w.Header().Set("Content-Encoding", "gzip")
 			gz := gzip.NewWriter(w)
 			gz.Write(b)
@@ -579,16 +575,18 @@ func serveStaticFile(route, filePath, contentType string, useGzip bool) {
 			w.Write(b)
 		}
 	})
-}
 
-func registerImageRoutes(rootDir, urlPrefix string) {
-	count := 0
-	filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
+	const imagesURLPrefix = "/static/images/"
+	handle(http.MethodGet, imagesURLPrefix, func(w http.ResponseWriter, r *http.Request) {
+		hashes := s.imageHashes.Load().(map[string]string)
+		if _, ok := hashes[r.URL.Path]; !ok {
+			http.NotFound(w, r)
+			return
 		}
+		rel := strings.TrimPrefix(r.URL.Path, imagesURLPrefix)
+
 		var ct string
-		switch strings.ToLower(filepath.Ext(d.Name())) {
+		switch strings.ToLower(filepath.Ext(rel)) {
 		case ".jpg", ".jpeg":
 			ct = "image/jpeg"
 		case ".png":
@@ -602,26 +600,17 @@ func registerImageRoutes(rootDir, urlPrefix string) {
 		case ".ico":
 			ct = "image/x-icon"
 		default:
-			return nil
+			http.NotFound(w, r)
+			return
 		}
-		rel, err := filepath.Rel(rootDir, path)
+		b, err := os.ReadFile(filepath.Join(staticDir, "images", filepath.FromSlash(rel)))
 		if err != nil {
-			return nil
+			http.NotFound(w, r)
+			return
 		}
-		route := urlPrefix + filepath.ToSlash(rel)
-		filePath := path
-		handle(http.MethodGet, route, func(w http.ResponseWriter, r *http.Request) {
-			b, err := os.ReadFile(filePath)
-			if err != nil {
-				http.Error(w, "not found", 404)
-				return
-			}
-			w.Header().Set("Cache-Control", "public, max-age=604800")
-			w.Header().Set("Content-Type", ct)
-			w.Write(b)
-		})
-		count++
-		return nil
+		w.Header().Set("Cache-Control", "public, max-age=604800")
+		w.Header().Set("Content-Type", ct)
+		w.Write(b)
 	})
 }
 
@@ -705,7 +694,7 @@ func main() {
 	})
 	handle(http.MethodGet, "/api/photos", func(w http.ResponseWriter, r *http.Request) {
 		var body []byte
-		if p := srv.photos.Load(); p != nil && len(p.Photos) > 0 {
+		if p := srv.imagesMetadata.Load(); p != nil && len(p.Images) > 0 {
 			body, _ = json.Marshal(p)
 		}
 		if body == nil {
@@ -1047,10 +1036,10 @@ func exifDateString(rootIfd *exif.Ifd) string {
 	return ""
 }
 
-func processImagesDir(dirPath string) *photoData {
+func processImagesDir(dirPath string) *imagesMetadata {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
-		slog.Warn("images dir not found, skipping photos", "path", dirPath, "err", err)
+		slog.Warn("images dir not found, skipping", "path", dirPath, "err", err)
 		return nil
 	}
 	var webpNames []string
@@ -1086,7 +1075,7 @@ func processImagesDir(dirPath string) *photoData {
 		return nil
 	}
 
-	var photos []photoRecord
+	var images []imageMetadata
 	var processed int
 	var firstSkipReason string
 	for _, name := range webpNames {
@@ -1144,7 +1133,7 @@ func processImagesDir(dirPath string) *photoData {
 			continue
 		}
 		processed++
-		rec := photoRecord{
+		rec := imageMetadata{
 			ID:       name,
 			Lat:      lat,
 			Lon:      lon,
@@ -1152,13 +1141,13 @@ func processImagesDir(dirPath string) *photoData {
 			URL:      "/static/images/full/" + name,
 			ThumbURL: "/static/images/thumb/" + name,
 		}
-		photos = append(photos, rec)
+		images = append(images, rec)
 	}
-	slog.Debug("photos from images dir", "processed", processed, "included", len(photos))
+	slog.Debug("scanned images", "processed", processed, "included", len(images))
 	if len(webpNames) > 0 && processed == 0 && firstSkipReason != "" {
-		slog.Info("all WebP files skipped", "example_reason", firstSkipReason, "hint", "photos need GPS in EXIF")
+		slog.Info("all WebP files skipped", "example_reason", firstSkipReason, "hint", "images need GPS in EXIF")
 	}
-	return &photoData{Photos: photos}
+	return &imagesMetadata{Images: images}
 }
 
 func segmentBearingDeg(a, b point) float64 {
