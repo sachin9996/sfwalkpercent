@@ -302,6 +302,7 @@ function fit() {
     midLat = (minLat + maxLat) / 2;
   tx = cx - midLon * scale;
   ty = cy + midLat * scale;
+  zoomTarget = null;
 }
 
 function canvasToContent(canvasX, canvasY, w, h) {
@@ -1426,6 +1427,7 @@ document.getElementById("zoomOut").addEventListener("click", () => {
   zoomAt(w / 2, h / 2, 1 / 1.5);
 });
 document.getElementById("zoomReset").addEventListener("click", () => {
+  markViewChanged();
   fit();
   scheduleDraw();
 });
