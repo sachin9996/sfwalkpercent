@@ -8,7 +8,8 @@ Walking all the streets of San Francisco!
 
 Put an **Apple Health export** zip in the `data/` directory. Use the Health app: Profile → Export All Health Data, then place the downloaded `export.zip` in `data/`.
 
-Neighborhood GeoJSON comes from [SF Open Data](https://data.sfgov.org/resource/gfpk-269f.geojson).
+- `neighborhoods.geojson` comes from [DataSF](https://data.sfgov.org/api/v3/views/gfpk-269f/query.geojson).
+- `sf.geojson` comes from [DataSF](https://data.sfgov.org/api/v3/views/3psu-pn9h/query.geojson)
 
 ```bash
 make

@@ -6,7 +6,7 @@ const PHOTO_PIN_MAX_PX = 26;
 const PHOTO_PIN_SCALE_LOW = 5000;
 const PHOTO_PIN_SCALE_HIGH = 40000;
 
-const defaultBounds = [-122.5136606, 37.670159, -122.357791, 37.8278432];
+const defaultBounds = [-122.516, 37.670159, -122.358, 37.844];
 const VIEW_BOUNDS = defaultBounds.slice();
 
 const canvas = document.getElementById("map");

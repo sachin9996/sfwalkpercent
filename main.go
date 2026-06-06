@@ -191,6 +191,71 @@ func (s *Server) storeDrawPayload(pathFeats []streetFeat, visitedSegs map[segmen
 	}
 }
 
+func excludedStreetLayer(layer string) bool {
+	switch layer {
+	case "FREEWAYS", "PAPER_FWYS", "PAPER_WATER", "PAPER", "PRIVATE", "PRIVATE_PARKING", "PSEUDO":
+		return true
+	}
+	return false
+}
+
+func walkableStreetLayer(layer string) bool {
+	if excludedStreetLayer(layer) {
+		return false
+	}
+	switch layer {
+	case "STREETS", "STREETS_PEDESTRI", "UPROW", "STREETS_TI", "STREETS_YBI", "STREETS_HUNTERSP":
+		return true
+	}
+	return strings.HasPrefix(layer, "PARKS")
+}
+
+func walkableStreet(active, accepted bool, layer string) bool {
+	if !active || !walkableStreetLayer(layer) {
+		return false
+	}
+	// Park trails and pedestrian paths are often active but not "accepted" in DPW records.
+	if layer == "STREETS" {
+		return accepted
+	}
+	return true
+}
+
+func loadStreetsFromGeoJSON(path string) ([]streetFeat, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		Features []streetFeat `json:"features"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return nil, err
+	}
+
+	var feats []streetFeat
+	for _, f := range doc.Features {
+		if f.Geometry.Type != "LineString" || len(f.Geometry.Coordinates) < 2 {
+			continue
+		}
+		layer, _ := f.Properties["layer"].(string)
+		active, _ := f.Properties["active"].(bool)
+		accepted, _ := f.Properties["accepted"].(bool)
+		if !walkableStreet(active, accepted, layer) {
+			continue
+		}
+		name, _ := f.Properties["streetname"].(string)
+		ft := streetFeat{Type: "Feature"}
+		ft.Geometry = f.Geometry
+		ft.Properties = map[string]any{"name": name}
+		if cnn, ok := f.Properties["cnn"].(string); ok && cnn != "" {
+			ft.Properties["cnn"] = cnn
+		}
+		feats = append(feats, ft)
+	}
+	return feats, nil
+}
+
 func newServer() (*Server, error) {
 	start := time.Now()
 	s := &Server{}
@@ -198,33 +263,12 @@ func newServer() (*Server, error) {
 
 	sfPath := filepath.Join(staticDir, "sf.geojson")
 	t0 := time.Now()
-	b, err := os.ReadFile(sfPath)
+	filtered, err := loadStreetsFromGeoJSON(sfPath)
 	if err != nil {
-		return nil, fmt.Errorf("read sf.geojson: %w", err)
-	}
-	slog.Debug("startup", "step", "read_streets_file", "duration_ms", time.Since(t0).Milliseconds(), "size_bytes", len(b))
-
-	var doc struct {
-		Features []streetFeat `json:"features"`
-	}
-	t0 = time.Now()
-	if err := json.Unmarshal(b, &doc); err != nil {
-		return nil, fmt.Errorf("parse sf.geojson: %w", err)
-	}
-	slog.Debug("startup", "step", "parse_streets_json", "duration_ms", time.Since(t0).Milliseconds(), "features", len(doc.Features))
-
-	t0 = time.Now()
-	var filtered []streetFeat
-	for _, f := range doc.Features {
-		h, _ := f.Properties["highway"].(string)
-		switch h {
-		case "motorway", "motorway_link", "trunk", "trunk_link":
-			continue
-		}
-		filtered = append(filtered, f)
+		return nil, fmt.Errorf("load sf.geojson: %w", err)
 	}
 	streets = filtered
-	slog.Debug("startup", "step", "filter_streets", "duration_ms", time.Since(t0).Milliseconds(), "walkable", len(streets))
+	slog.Debug("startup", "step", "load_sf_geojson", "duration_ms", time.Since(t0).Milliseconds(), "walkable", len(streets))
 
 	t0 = time.Now()
 	fc := map[string]any{"type": "FeatureCollection", "features": streets}
@@ -1435,7 +1479,7 @@ func buildDrawCore(pathFeats []streetFeat, visitedSegs map[segmentKey]struct{}, 
 	}
 	out.Streets = polylinesToPathString(streetPolys)
 	out.Paths = polylinesToPathString(pathPolys)
-	out.Bounds = [4]float64{-122.5136606, 37.670159, -122.357791, 37.8278432}
+	out.Bounds = [4]float64{-122.516, 37.670159, -122.358, 37.844}
 	if len(nbds) > 0 {
 		var allRings [][][]float64
 		for i := range nbds {
