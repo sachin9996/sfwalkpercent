@@ -233,6 +233,17 @@ func loadStreetsFromGeoJSON(path string) ([]streetFeat, error) {
 		return nil, err
 	}
 
+	// streetname drops apostrophes; f_st/t_st keep them (OFARRELL ST vs O'FARRELL ST).
+	aposName := map[string]string{}
+	for _, f := range doc.Features {
+		for _, key := range []string{"f_st", "t_st"} {
+			v, _ := f.Properties[key].(string)
+			if strings.Contains(v, "'") {
+				aposName[strings.ReplaceAll(v, "'", "")] = v
+			}
+		}
+	}
+
 	var feats []streetFeat
 	for _, f := range doc.Features {
 		if f.Geometry.Type != "LineString" || len(f.Geometry.Coordinates) < 2 {
@@ -245,6 +256,9 @@ func loadStreetsFromGeoJSON(path string) ([]streetFeat, error) {
 			continue
 		}
 		name, _ := f.Properties["streetname"].(string)
+		if fixed, ok := aposName[name]; ok {
+			name = fixed
+		}
 		ft := streetFeat{Type: "Feature"}
 		ft.Geometry = f.Geometry
 		ft.Properties = map[string]any{"name": name}
@@ -1503,6 +1517,22 @@ func buildDrawCore(pathFeats []streetFeat, visitedSegs map[segmentKey]struct{}, 
 	return out
 }
 
+func toTitleCase(s string) string {
+	s = strings.ToLower(s)
+	b := make([]byte, len(s))
+	capNext := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		isWord := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'
+		if capNext && c >= 'a' && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		b[i] = c
+		capNext = !isWord
+	}
+	return string(b)
+}
+
 func buildDrawOverlay(st *nbdStats) *drawOverlayPayload {
 	out := &drawOverlayPayload{}
 	for _, f := range streets {
@@ -1542,7 +1572,7 @@ func buildDrawOverlay(st *nbdStats) *drawOverlayPayload {
 		angle := math.Atan2(-dlat, dlon)
 		length := math.Sqrt((maxLon-minLon)*(maxLon-minLon) + (maxLat-minLat)*(maxLat-minLat))
 		out.Labels = append(out.Labels, drawLabel{
-			Lon: sumLon / n, Lat: sumLat / n, Name: name,
+			Lon: sumLon / n, Lat: sumLat / n, Name: toTitleCase(name),
 			MinLon: minLon, MaxLon: maxLon, MinLat: minLat, MaxLat: maxLat,
 			Angle: angle, Length: length,
 		})
