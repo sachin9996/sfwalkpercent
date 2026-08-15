@@ -666,7 +666,7 @@ func (s *Server) registerStaticRoutes(staticDir string) {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Cache-Control", "public, max-age=604800")
+		w.Header().Set("Cache-Control", "max-age=31536000, immutable")
 		w.Header().Set("Content-Type", ct)
 		w.Write(b)
 	})
@@ -848,7 +848,7 @@ func main() {
 			slog.Debug("request", attrs...)
 		}()
 		h := rw.Header()
-		h.Set("Cache-Control", "public, max-age=600")
+		h.Set("Cache-Control", "max-age=600")
 		h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
