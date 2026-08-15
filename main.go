@@ -599,7 +599,7 @@ func (s *Server) registerStaticRoutes(staticDir string) {
 		w.Write(html)
 	})
 
-	handle(http.MethodGet, "/static/index.css", func(w http.ResponseWriter, r *http.Request) {
+	handle(http.MethodGet, "/static/index.ed83d8cfdc1d.css", func(w http.ResponseWriter, r *http.Request) {
 		b, err := os.ReadFile(filepath.Join(staticDir, "index.css"))
 		if err != nil {
 			http.NotFound(w, r)
@@ -607,6 +607,7 @@ func (s *Server) registerStaticRoutes(staticDir string) {
 		}
 		b = bytes.Replace(b, []byte("__EXPL_FRACTION__"), []byte(*s.explFrac.Load()), 1)
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 			w.Header().Set("Content-Encoding", "gzip")
 			gz := gzip.NewWriter(w)
@@ -617,13 +618,14 @@ func (s *Server) registerStaticRoutes(staticDir string) {
 		}
 	})
 
-	handle(http.MethodGet, "/static/index.js", func(w http.ResponseWriter, r *http.Request) {
+	handle(http.MethodGet, "/static/index.04d64062d7a3.js", func(w http.ResponseWriter, r *http.Request) {
 		b, err := os.ReadFile(filepath.Join(staticDir, "index.js"))
 		if err != nil {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 			w.Header().Set("Content-Encoding", "gzip")
 			gz := gzip.NewWriter(w)
