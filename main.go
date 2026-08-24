@@ -668,7 +668,7 @@ func (s *Server) registerStaticRoutes(staticDir string) {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Cache-Control", "max-age=31536000, immutable")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		w.Header().Set("Content-Type", ct)
 		w.Write(b)
 	})
